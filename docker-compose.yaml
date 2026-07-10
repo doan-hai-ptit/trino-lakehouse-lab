@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lakehouse-postgres
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    ports:
+      - "5432:5432"
+    volumes:
+      - 'D:\Volumes\trino-lakehouse\postgres:/var/lib/postgresql/data'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: lakehouse-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - 'D:\Volumes\trino-lakehouse\minio:/data'
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  hive-metastore:
+    image: apache/hive:standalone-metastore-4.2.0
+    container_name: lakehouse-hive-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HADOOP_OPTIONAL_TOOLS: hadoop-aws
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+        -Dhive.metastore.warehouse.dir=s3a://warehouse/
+        -Dfs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+        -Dfs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+        -Dfs.s3a.endpoint=http://minio:9000
+        -Dfs.s3a.access.key=minioadmin
+        -Dfs.s3a.secret.key=minioadmin
+        -Dfs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+        -Dfs.s3a.path.style.access=true
+        -Dfs.s3a.connection.ssl.enabled=false
+    ports:
+      - "9083:9083"
+    volumes:
+      - "./jars/postgresql-42.7.7.jar:/opt/hive/lib/postgresql-42.7.7.jar:ro"
+      - "./jars/hadoop-aws-3.4.1.jar:/opt/hive/lib/hadoop-aws-3.4.1.jar:ro"
+      - "./jars/bundle-2.24.6.jar:/opt/hive/lib/bundle-2.24.6.jar:ro"
+      - "./jars/bundle-2.24.6.jar:/opt/hadoop/share/hadoop/tools/lib/bundle-2.24.6.jar:ro"
+      - "./hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro"
+      - "./hadoop/core-site.xml:/opt/hive/conf/core-site.xml:ro"
+      # - "./jars:/tmp/ext-jars:ro"
+
+
+  trino:
+    image: trinodb/trino:481
+    container_name: lakehouse-trino
+    depends_on:
+      hive-metastore:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - "./trino/etc:/etc/trino:ro"
+      - 'D:\Volumes\trino-lakehouse\data:/data:ro'

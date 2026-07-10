@@ -1,0 +1,49 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Docker and local runtime data
+data/
+logs/
+*.log
+*.pid
+
+# Large binary dependencies and generated artifacts
+jars/
+*.jar
+*.parquet
+*.orc
+*.avro
+*.delta/
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
