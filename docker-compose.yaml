@@ -74,7 +74,7 @@ services:
 
 
   trino:
-    image: trinodb/trino:481
+    image: trinodb/trino:482
     container_name: lakehouse-trino
     depends_on:
       hive-metastore:
