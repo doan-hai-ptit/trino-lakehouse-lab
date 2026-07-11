@@ -85,4 +85,29 @@ services:
       - "8080:8080"
     volumes:
       - "./trino/etc:/etc/trino:ro"
-      - 'D:\Volumes\trino-lakehouse\data:/data:ro'
+
+  trino-worker-1:
+    image: trinodb/trino:482
+    container_name: lakehouse-trino-worker-1
+    depends_on:
+      trino:
+        condition: service_started
+      hive-metastore:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - "./trino-worker-1/etc:/etc/trino:ro"
+
+  trino-worker-2:
+    image: trinodb/trino:482
+    container_name: lakehouse-trino-worker-2
+    depends_on:
+      trino:
+        condition: service_started
+      hive-metastore:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - "./trino-worker-2/etc:/etc/trino:ro"
