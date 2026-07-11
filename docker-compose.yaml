@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - 'D:\Volumes\trino-lakehouse\postgres:/var/lib/postgresql/data'
     healthcheck:
@@ -111,3 +111,14 @@ services:
         condition: service_healthy
     volumes:
       - "./trino-worker-2/etc:/etc/trino:ro"
+  nginx:
+    image: nginx:1.30.3-alpine
+    container_name: lakehouse-nginx
+    depends_on:
+      trino:
+        condition: service_started
+    ports:
+      - "443:443"
+    volumes:
+      - "./nginx/conf.d:/etc/nginx/conf.d:ro"
+      - "./secrets/certs:/etc/nginx/certs:ro"
