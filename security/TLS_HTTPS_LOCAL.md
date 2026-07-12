@@ -1,6 +1,12 @@
-# Bật TLS/HTTPS local cho Trino
+# HTTPS local cho Trino qua Nginx
 
-Tài liệu này cấu hình HTTPS cho lab Docker hiện tại với kiến trúc:
+> Tóm tắt theo [TLS and HTTPS — Trino current](https://trino.io/docs/current/security/tls.html) (trang hiển thị Trino 482 khi đối chiếu ngày 2026-07-11).
+
+Tài liệu này dùng mô hình **TLS termination tại Nginx** cho lab Docker. Đây là hướng Trino khuyến nghị khi đã có load balancer hoặc reverse proxy: client kết nối HTTPS đến proxy, proxy chuyển tiếp HTTP trên Docker network đến Trino coordinator.
+
+Nó chỉ mã hóa hop **client → Nginx**. Hop `Nginx → coordinator` vẫn là HTTP và phải ở Docker network riêng/tin cậy; nó không được public ra host. Hướng dẫn này không bật TLS native của Trino và cũng không mã hóa traffic coordinator ↔ worker; xem [SECURE_INTERNAL_COMMUNICATION.md](SECURE_INTERNAL_COMMUNICATION.md) nếu cần lớp bảo vệ nội bộ.
+
+## 1. Kiến trúc và ranh giới bảo mật
 
 ```text
 Browser / CLI
@@ -11,42 +17,34 @@ Nginx (TLS termination)
      |
 http://trino:8080 (Docker network nội bộ)
      |
-Trino coordinator <--> 2 Trino workers
+Trino coordinator <--> workers
 ```
 
-`trino.localhost` chỉ phù hợp cho máy local. Không cần mua tên miền và không cần sửa file `hosts` vì tên miền có hậu tố `.localhost` được trỏ tới loopback.
+Trino hỗ trợ TLS 1.2 và 1.3 cho client. Trong mô hình này:
 
-> TLS trong hướng dẫn này bảo vệ đường đi từ client đến Trino coordinator. Kết nối coordinator-to-worker vẫn là HTTP trong Docker network nội bộ. Xem phần [Mở rộng production](#mở-rộng-production) nếu cần mã hóa traffic nội bộ.
+- Nginx giữ certificate/private key và thực hiện TLS handshake.
+- Nginx gửi `X-Forwarded-Proto: https`; Trino phải có `http-server.process-forwarded=true` để hiểu request đã được bảo vệ tại proxy.
+- Không cần bật `http-server.https.enabled=true` trên coordinator chỉ để dùng mô hình Nginx này.
+- HTTPS không tự xác thực hay phân quyền user. Khi dùng password/OAuth/... phải bật authentication và access control riêng.
 
-## Điều kiện trước khi bắt đầu
+> **Trạng thái repository hiện tại:** service `trino` vẫn publish `8080:8080`. Password authentication thông thường từ chối HTTP trực tiếp, nhưng đó không đủ để coi cổng này an toàn: khi `http-server.process-forwarded=true`, client HTTP không tin cậy có thể tự gửi `X-Forwarded-Proto: https` và làm Trino coi request cleartext là đã được bảo vệ. Trước khi coi lab là HTTPS-only hoặc bật password authentication, phải bỏ host-port mapping này; chỉ Nginx nên public `443`.
 
-- Docker Desktop đang chạy.
-- Docker Compose đang có các service: `trino`, `trino-worker-1`, `trino-worker-2`.
-- PowerShell đang đứng tại thư mục gốc của project.
-- Port `443` trên máy local chưa bị chương trình khác chiếm.
+> HTTPS trong tài liệu này chỉ bảo vệ frontend Trino. Compose hiện cũng publish PostgreSQL (`5433`), MinIO (`9000`/`9001`) và Hive Metastore (`9083`); lab chưa phải một deployment production-hardened. Với môi trường ngoài local, bỏ/bind/protect các host port đó riêng.
 
-Kiểm tra port 443 (không có output nghĩa là đang trống):
+Vì `http-server.process-forwarded=true` khiến Trino xử lý forwarded header từ proxy, coordinator không nên là endpoint HTTP công khai cho client không tin cậy.
 
-```powershell
-Get-NetTCPConnection -LocalPort 443 -ErrorAction SilentlyContinue
-```
+## 2. Chuẩn bị certificate local
 
-## 1. Cài và khởi tạo CA local với mkcert
+`trino.localhost` phù hợp cho máy local. Dùng `mkcert` để tạo CA local mà Chrome/Edge trên máy phát triển tin cậy.
 
-Mở PowerShell **Run as Administrator**, sau đó chạy:
+Mở PowerShell **Run as Administrator**:
 
 ```powershell
 winget install -e --id FiloSottile.mkcert
 mkcert -install
 ```
 
-Lệnh `mkcert -install` cài CA local vào Windows trust store để Chrome/Edge tin certificate được tạo ở bước sau.
-
-> Không chia sẻ private key hoặc thư mục CA do `mkcert` tạo. CA đó có thể được dùng để tạo certificate mà máy của bạn tin cậy.
-
-## 2. Tạo certificate cho Trino local
-
-Mở một PowerShell bình thường tại thư mục gốc project và chạy:
+Tại thư mục gốc project, tạo certificate:
 
 ```powershell
 New-Item -ItemType Directory -Force secrets\certs
@@ -55,29 +53,25 @@ mkcert -cert-file secrets\certs\trino.localhost.pem `
   trino.localhost localhost 127.0.0.1 ::1
 ```
 
-Kết quả cần có hai file sau:
+Kết quả:
 
 ```text
 secrets/certs/trino.localhost.pem
 secrets/certs/trino.localhost-key.pem
 ```
 
-Không commit các file này. Thêm dòng sau vào `.gitignore`:
+Không commit certificate hay private key. Repository đã bỏ qua `secrets/`; cũng không chia sẻ CA local do `mkcert` tạo.
 
-```gitignore
-secrets/
-```
+## 3. Cấu hình Nginx — giữ nguyên các header proxy
 
-## 3. Tạo cấu hình Nginx
-
-Tạo thư mục và mở file cấu hình:
+Tạo `nginx/conf.d/trino.conf`:
 
 ```powershell
 New-Item -ItemType Directory -Force nginx\conf.d
 notepad nginx\conf.d\trino.conf
 ```
 
-Dán toàn bộ nội dung sau vào `nginx/conf.d/trino.conf`, lưu file và đóng Notepad:
+Nội dung:
 
 ```nginx
 server {
@@ -98,24 +92,18 @@ server {
 }
 ```
 
-## 4. Cập nhật Docker Compose
+`proxy_pass http://trino:8080` là địa chỉ service Docker, không phải `localhost:8080`. Trong container Nginx, `localhost` trỏ về chính Nginx.
 
-Mở `docker-compose.yaml`.
+## 4. Docker Compose: chỉ public Nginx
 
-### 4.1 Không public cổng Trino 8080
-
-Trong service `trino`, xóa phần sau:
+Trong service `trino`, **xóa** host port mapping sau nếu còn tồn tại:
 
 ```yaml
-    ports:
-      - "8080:8080"
+ports:
+  - "8080:8080"
 ```
 
-Nginx vẫn kết nối được đến `trino:8080` qua Docker network. Việc bỏ port mapping giúp người dùng không bypass HTTPS bằng `http://localhost:8080`.
-
-### 4.2 Thêm Nginx service
-
-Thêm service sau ở cùng cấp với `trino` và các service khác:
+Giữ service Nginx ở cùng Docker Compose project:
 
 ```yaml
   nginx:
@@ -131,58 +119,52 @@ Thêm service sau ở cùng cấp với `trino` và các service khác:
       - "./secrets/certs:/etc/nginx/certs:ro"
 ```
 
-Pin version `1.30.3-alpine` để lần chạy sau không tự đổi version Nginx bất ngờ.
+Nginx vẫn truy cập được `trino:8080` qua network Docker, nên không cần public cổng này ra máy host.
 
-## 5. Cho Trino tin header HTTPS từ Nginx
+## 5. Cấu hình coordinator
 
-Trong `trino/etc/config.properties`, giữ các dòng hiện có và thêm:
-
-```properties
-http-server.process-forwarded=true
-```
-
-Cấu hình coordinator hoàn chỉnh sẽ có dạng:
+Trong `trino/etc/config.properties`, giữ HTTP endpoint nội bộ và thêm/giữ dòng sau để nhận forwarded header:
 
 ```properties
-coordinator=true
-node-scheduler.include-coordinator=true
 http-server.http.port=8080
 http-server.process-forwarded=true
 discovery.uri=http://trino:8080
 ```
 
-`discovery.uri` dùng hostname Docker `trino` để hai worker tìm được coordinator. Không đổi nó thành `https://trino.localhost`, vì đây không phải endpoint nội bộ của các containers trong cấu hình TLS termination tại Nginx.
+`discovery.uri` là kết nối nội bộ để worker tìm coordinator, nên không đổi thành `https://trino.localhost` trong mô hình TLS termination tại Nginx. Các cấu hình authentication, shared secret và catalog hiện có phải được giữ riêng; block trên chỉ là phần liên quan proxy/TLS frontend.
 
-## 6. Kiểm tra cấu hình và khởi động
+### Phương án khác: TLS trực tiếp trên Trino
+
+Nếu không dùng reverse proxy, Trino có thể tự phục vụ HTTPS trên coordinator bằng certificate mà process coordinator đọc được:
+
+```properties
+http-server.https.enabled=true
+http-server.https.port=8443
+http-server.https.keystore.path=etc/clustercoord.pem
+```
+
+Không trộn cấu hình native này vào mô hình Nginx chỉ vì muốn có HTTPS: tài liệu Trino nêu rõ coordinator phía sau load balancer/proxy không cần `http-server.https.enabled=true`. Direct TLS phù hợp khi coordinator là endpoint HTTPS trực tiếp; xem trang nguồn để biết PEM/JKS/PKCS#12 và password của JKS.
+
+`http-server.https.keystore.path=etc/clustercoord.pem` là ví dụ path tương đối cho bản cài tar.gz trong tài liệu Trino, không phải path Docker của repository này. Nếu chủ động chuyển sang direct TLS trong container, mount certificate ở một vị trí riêng và dùng đường dẫn tuyệt đối của mount đó; không giả định `etc/clustercoord.pem` sẽ trỏ vào `/etc/trino`.
+
+## 6. Khởi động và xác minh
 
 Kiểm tra Compose trước:
 
 ```powershell
 docker compose config --quiet
-```
-
-Khởi động hoặc cập nhật containers:
-
-```powershell
 docker compose up -d
 docker compose ps
-```
-
-Kiểm tra log Nginx nếu service không lên:
-
-```powershell
 docker compose logs nginx
 ```
 
-Kiểm tra các node Trino đã đăng ký:
+Xác nhận cổng HTTP không còn publish ra host:
 
 ```powershell
-docker compose logs trino
-docker compose logs trino-worker-1
-docker compose logs trino-worker-2
+docker compose port trino 8080
 ```
 
-## 7. Xác minh HTTPS
+Lệnh trên không được trả về host port. Nếu nó trả về một địa chỉ, xóa `8080:8080` rồi tạo lại service `trino`.
 
 Mở Web UI:
 
@@ -190,76 +172,45 @@ Mở Web UI:
 https://trino.localhost/ui
 ```
 
-Certificate phải được trình duyệt tin cậy, không có cảnh báo bảo mật.
-
-Kiểm tra từ PowerShell:
+Certificate phải được browser tin cậy. Khi password authentication đang bật, lệnh sau có thể trả `401 Unauthorized` nếu không gửi credential; đó vẫn là dấu hiệu TLS/proxy đã nhận request:
 
 ```powershell
 curl.exe -I https://trino.localhost
 ```
 
-CLI Trino sử dụng URL HTTPS:
+Kiểm thử end-to-end bằng CLI qua HTTPS:
 
 ```powershell
-trino --server https://trino.localhost
+trino --server https://trino.localhost --user admin --password
 ```
-
-Sau khi vào CLI, chạy:
 
 ```sql
 SELECT node_id, coordinator, state
 FROM system.runtime.nodes;
 ```
 
-Kết quả cần có ba node: một coordinator và hai worker đang `active`.
+Kết quả của lab phải có một coordinator và hai worker `active`.
 
-## Khắc phục lỗi thường gặp
+## 7. Lỗi thường gặp
 
-### Không truy cập được `https://trino.localhost`
+| Triệu chứng | Kiểm tra |
+| --- | --- |
+| Không vào được `https://trino.localhost` | `docker compose ps`, port `443`, `docker compose logs nginx` và hai file trong `secrets/certs/`. |
+| Browser không tin certificate | Chạy lại `mkcert -install` với quyền Administrator, rồi khởi động lại browser. Máy khác cần tin CA local riêng hoặc dùng CA doanh nghiệp. |
+| Nginx không thấy upstream | Giữ `proxy_pass http://trino:8080` và đảm bảo service coordinator vẫn tên `trino`. |
+| Vẫn vào được `http://localhost:8080` | `8080:8080` vẫn đang được publish; bỏ mapping và recreate coordinator. |
+| Worker không xuất hiện | Kiểm tra `coordinator=false` và `discovery.uri=http://trino:8080` ở worker; TLS frontend không thay đổi discovery nội bộ. |
 
-1. Kiểm tra Nginx đang chạy: `docker compose ps`.
-2. Kiểm tra port 443: `Get-NetTCPConnection -LocalPort 443`.
-3. Xem log: `docker compose logs nginx`.
-4. Đảm bảo hai file certificate ở đúng thư mục `secrets/certs/`.
+## 8. Khi đưa ra môi trường ngoài local
 
-### Browser báo certificate không tin cậy
-
-Chạy lại PowerShell bằng quyền Administrator:
-
-```powershell
-mkcert -install
-```
-
-Sau đó đóng và mở lại browser. Trên máy khác trong LAN, certificate này sẽ không được tin cậy; cần cài CA local vào máy đó hoặc sử dụng CA/chứng chỉ doanh nghiệp.
-
-### Nginx báo không tìm thấy upstream `trino`
-
-Đảm bảo tất cả service thuộc cùng một Docker Compose project, và service coordinator vẫn tên là `trino`. Không thay `proxy_pass http://trino:8080` bằng `localhost:8080`; trong container, `localhost` là chính container Nginx.
-
-### Worker không hiện trong `system.runtime.nodes`
-
-Kiểm tra các file worker đều chứa:
-
-```properties
-coordinator=false
-discovery.uri=http://trino:8080
-```
-
-Mỗi worker phải có `node.id` riêng, ví dụ `trino-worker-1` và `trino-worker-2`.
-
-## Mở rộng production
-
-Khi đưa ra Internet, thay `trino.localhost` bằng tên miền thật, ví dụ `trino.example.com`:
-
-1. Mua/đăng ký domain và tạo DNS record `A` trỏ đến public IP của server.
-2. Mở firewall port 80/443; chỉ public Nginx, không public `8080` của Trino.
-3. Dùng certificate từ Let's Encrypt hoặc CA doanh nghiệp, có gia hạn tự động.
-4. Bật authentication và access control trong Trino; HTTPS chỉ mã hóa đường truyền, không xác thực người dùng.
-5. Nếu mạng giữa coordinator và workers không được tin cậy, cấu hình thêm TLS cho internal communication bằng `internal-communication.https.required=true` và làm theo tài liệu Trino cho mô hình multi-node.
+- Thay certificate `mkcert` bằng certificate CA công khai hoặc CA doanh nghiệp; self-signed certificate không phù hợp production.
+- Chỉ public proxy/load balancer, không public HTTP coordinator.
+- Nếu proxy và coordinator không cùng private/trusted network, bảo vệ cả upstream proxy → coordinator thay vì giữ `proxy_pass` qua HTTP.
+- Bật authentication và access control; HTTPS chỉ bảo vệ kênh truyền.
+- Nếu network giữa các node không tin cậy, bật [Secure internal communication](SECURE_INTERNAL_COMMUNICATION.md).
 
 ## Tham khảo
 
-- [Trino: TLS and HTTPS](https://trino.io/docs/current/security/tls.html)
-- [Trino: Security overview](https://trino.io/docs/current/security/overview.html)
+- [Trino — TLS and HTTPS](https://trino.io/docs/current/security/tls.html)
+- [Trino — Secure internal communication](https://trino.io/docs/current/security/internal-communication.html)
 - [mkcert](https://github.com/FiloSottile/mkcert)
-- [Nginx download](https://nginx.org/en/download.html)

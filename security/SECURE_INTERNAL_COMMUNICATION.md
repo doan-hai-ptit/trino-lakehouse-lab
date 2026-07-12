@@ -1,30 +1,44 @@
-# Bật Secure Internal Communication cho Trino
+# Secure internal communication cho Trino
 
-Hướng dẫn này bật xác thực nội bộ bằng shared secret và mã hóa TLS cho lưu lượng giữa Trino coordinator và workers. Phạm vi là **node-to-node traffic**; TLS/HTTPS từ client đến coordinator là cấu hình riêng (lab hiện có tài liệu `TLS_HTTPS_LOCAL.md`).
+> Tóm tắt theo [Secure internal communication — Trino current](https://trino.io/docs/current/security/internal-communication.html) (trang hiển thị Trino 482 khi đối chiếu ngày 2026-07-11).
 
-Theo tài liệu Trino, shared secret là bắt buộc khi đã bật internal TLS; mọi node phải dùng cùng secret và cùng cấu hình TLS. Node cấu hình sai sẽ không thể đăng ký/trao đổi với coordinator.
+Tài liệu này bảo vệ traffic **node-to-node** trong Trino: xác thực node bằng shared secret và, nếu bật, mã hóa traffic coordinator ↔ worker bằng TLS tự động. Nó khác với HTTPS cho client; hướng dẫn frontend proxy nằm ở [TLS_HTTPS_LOCAL.md](TLS_HTTPS_LOCAL.md).
 
-> Cần có thời gian dừng dịch vụ: việc này yêu cầu khởi động lại coordinator và tất cả worker.
+> **Trạng thái repository hiện tại:** internal TLS chưa được bật. Các node vẫn discovery qua `http://trino:8080` và chưa có `internal-communication.https.required=true`. Hướng dẫn này là cấu hình mục tiêu, không tự sửa Compose hay các file config.
 
-## 1. Chuẩn bị địa chỉ IP cố định cho coordinator
+> **Shared secret hiện tại cần được coi là đã lộ:** repository đang lưu một giá trị literal trong các `config.properties` được Git theo dõi. Trước khi dùng ngoài lab, hãy rotate secret, gỡ secret khỏi file tracked và nạp nó qua cơ chế secret/config được bỏ qua bởi Git.
 
-Internal TLS tự tạo certificate của Trino chỉ hỗ trợ **địa chỉ IP**, không hỗ trợ hostname/FQDN trong `discovery.uri`. Vì vậy không dùng `https://trino:8443` trong cấu hình mới.
+## 1. Khi nào shared secret là bắt buộc
 
-Với Docker Compose, đặt IP tĩnh cho service `trino` trên một mạng riêng. Ví dụ, thêm/cập nhật phần sau trong `docker-compose.yaml` (giữ nguyên các service và volume hiện có):
+Trino yêu cầu cùng một shared secret trên **mọi node** khi:
+
+- dùng bất kỳ client authentication nào trên coordinator (password file, OAuth, LDAP, ...); hoặc
+- bật TLS cho internal communication.
+
+Node có secret khác sẽ không được coordinator xác thực/đăng ký. Shared secret xác thực node; nó không tự mã hóa traffic. Để mã hóa traffic nội bộ cần bật `internal-communication.https.required=true`.
+
+## 2. Điều kiện và mạng Docker
+
+Internal TLS tự tạo certificate và trust configuration. Vì cơ chế này chỉ hỗ trợ **IP address**, `discovery.uri` phải dùng IP của coordinator — không dùng hostname/FQDN như `https://trino:8443`.
+
+Chọn một subnet Docker chưa dùng và gắn IP cố định cho coordinator. Trong project này, coordinator và worker còn cần nói chuyện với Nginx, Hive Metastore và MinIO trên network `default`. Vì vậy không thay thế `default` bằng một network mới; dùng **cả hai** network:
 
 ```yaml
 services:
   trino:
     networks:
+      default:
       trino-internal:
         ipv4_address: 172.28.0.10
 
   trino-worker-1:
     networks:
+      - default
       - trino-internal
 
   trino-worker-2:
     networks:
+      - default
       - trino-internal
 
 networks:
@@ -34,57 +48,47 @@ networks:
         - subnet: 172.28.0.0/24
 ```
 
-Nếu file Compose đã khai báo mạng, chỉ cần thêm `ipv4_address: 172.28.0.10` cho coordinator và đảm bảo subnet không trùng với mạng Docker đang tồn tại. Thay `172.28.0.10` trong toàn bộ hướng dẫn bằng IP bạn chọn.
+Thay `172.28.0.10` và `172.28.0.0/24` bằng dải không trùng với network Docker đang có. Giữ `default` để các hostname service hiện hữu như `trino`, `hive-metastore` và `minio` tiếp tục hoạt động.
 
-## 2. Tạo shared secret
+## 3. Tạo shared secret
 
-Tạo secret dài, ngẫu nhiên một lần rồi lưu ở secret manager hoặc nơi chỉ quản trị viên đọc được. Không commit secret vào Git và không ghi ra log.
+Tạo một secret dài, ngẫu nhiên và lưu trong secret manager hoặc vị trí chỉ quản trị viên đọc. Không commit, không in ra log và không dùng giá trị thật trong tài liệu.
 
-Trên Linux/macOS có OpenSSL:
+Lệnh Trino nêu cho Linux/macOS:
 
 ```bash
 openssl rand 512 | base64
 ```
 
-Trên PowerShell, tạo chuỗi Base64 ngẫu nhiên tương đương:
+Tương đương trên PowerShell:
 
 ```powershell
 [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(512))
 ```
 
-Sao chép toàn bộ giá trị kết quả; ví dụ dưới đây gọi nó là `<SHARED_SECRET>`.
+Gọi giá trị kết quả là `<SHARED_SECRET>` trong các block dưới.
 
-## 3. Cập nhật cấu hình của mọi node
+## 4. Cấu hình đồng nhất cho mọi node
 
-Chọn một HTTPS port nội bộ chưa sử dụng, ví dụ `8443`. Trong **cả ba** file dưới đây, thêm các dòng giống nhau và đổi `discovery.uri` sang IP tĩnh của coordinator:
+Chọn một HTTPS port nội bộ, ví dụ `8443`. Cập nhật **cả ba** file:
 
 - `trino/etc/config.properties`
 - `trino-worker-1/etc/config.properties`
 - `trino-worker-2/etc/config.properties`
 
+Các dòng internal TLS bắt buộc:
+
 ```properties
-# Bắt buộc: cùng một giá trị trên coordinator và mọi worker
 internal-communication.shared-secret=<SHARED_SECRET>
-
-# Bật TLS tự động cho communication nội bộ
 internal-communication.https.required=true
-
-# Chỉ dùng IP của coordinator, không dùng hostname/FQDN
 discovery.uri=https://172.28.0.10:8443
-
-# Mở HTTPS endpoint trên từng node
 http-server.https.enabled=true
 http-server.https.port=8443
 ```
 
-Lưu ý:
+Các giá trị secret, URI và HTTPS port phải giống hệt nhau trên coordinator/worker. Trino tự tạo certificate nên không cần tự phân phối certificate hay truststore.
 
-- Giữ lại `coordinator=true` (và các thiết lập scheduler) của coordinator; workers giữ `coordinator=false`.
-- `http-server.http.port=8080` có thể vẫn giữ nếu bạn còn dùng HTTP endpoint/proxy cho client. Internal communication sẽ dùng HTTPS sau khi `internal-communication.https.required=true` được bật.
-- Các file phải có cùng `internal-communication.shared-secret`, `internal-communication.https.required`, HTTPS port và `discovery.uri` (trừ các dòng vai trò riêng của từng node).
-- Không cần tự tạo hoặc phân phối certificate: Trino tự tạo certificate và trust configuration cho TLS nội bộ.
-
-Ví dụ cấu hình tối thiểu của coordinator sau khi cập nhật:
+Ví dụ coordinator sau khi thêm internal TLS (giữ các property khác của coordinator, gồm authentication, catalog và proxy nếu có):
 
 ```properties
 coordinator=true
@@ -98,7 +102,7 @@ internal-communication.shared-secret=<SHARED_SECRET>
 internal-communication.https.required=true
 ```
 
-Ví dụ worker (thay `node.id` trong `node.properties` là riêng biệt như hiện tại):
+Ví dụ worker:
 
 ```properties
 coordinator=false
@@ -110,17 +114,19 @@ internal-communication.shared-secret=<SHARED_SECRET>
 internal-communication.https.required=true
 ```
 
-## 4. Kiểm tra và khởi động lại cluster
+Có thể giữ `http-server.http.port=8080` vì Nginx vẫn forward frontend traffic đến coordinator qua HTTP. Tuy nhiên, khi mô hình frontend là HTTPS-only, không publish `8080` ra host; xem [TLS_HTTPS_LOCAL.md](TLS_HTTPS_LOCAL.md).
 
-Kiểm tra cú pháp Compose rồi khởi động lại toàn bộ node để các giá trị mới được áp dụng nhất quán:
+## 5. Triển khai và xác minh
+
+Việc đổi discovery URI/TLS cần restart mọi node. Trước khi áp dụng, kiểm tra Compose:
 
 ```powershell
 docker compose config --quiet
-docker compose up -d --force-recreate
+docker compose up -d --force-recreate trino trino-worker-1 trino-worker-2 nginx
 docker compose ps
 ```
 
-Nếu worker không lên, xem log từng node:
+Nếu worker không lên, xem log:
 
 ```powershell
 docker compose logs trino
@@ -128,54 +134,49 @@ docker compose logs trino-worker-1
 docker compose logs trino-worker-2
 ```
 
-## 5. Xác minh shared secret và TLS nội bộ
+Xác minh bằng Web UI hoặc CLI:
 
-1. Mở Trino Web UI rồi xác nhận số `ACTIVE WORKERS` bằng số worker được cấu hình (với lab này là 2).
-2. Hoặc chạy query từ CLI/Web UI:
+```sql
+SELECT node_id, coordinator, state
+FROM system.runtime.nodes;
+```
 
-   ```sql
-   SELECT node_id, coordinator, state
-   FROM system.runtime.nodes;
-   ```
+Lab phải hiển thị một coordinator và hai worker `active`. Trino cũng đề xuất test shared secret theo cách có kiểm soát: đổi secret của một worker, restart worker đó và xác nhận số `ACTIVE WORKERS` giảm một; sau đó khôi phục secret và xác nhận worker đăng ký lại.
 
-   Kết quả phải có coordinator và 2 worker ở trạng thái `active`.
-3. Để kiểm tra xác thực thực sự hoạt động (chỉ làm trong môi trường lab), đổi shared secret của một worker, khởi động lại worker đó, rồi kiểm tra số `ACTIVE WORKERS` giảm đi 1. Worker có secret sai không được coordinator xác thực và không đăng ký được.
-4. Khôi phục secret đúng, khởi động lại worker (hoặc toàn cluster) và xác nhận đầy đủ workers quay lại `active`.
+## 6. Hiệu năng và tinh chỉnh tùy chọn
 
-## Hiệu năng và tinh chỉnh tùy chọn
+TLS nội bộ có overhead CPU. Các query truyền ít dữ liệu giữa node (ví dụ `SELECT count(*) FROM table`) thường ít ảnh hưởng hơn; distributed join, aggregation và window function có thể chậm đáng kể. Đo đạc trước khi tinh chỉnh.
 
-TLS làm tăng chi phí CPU và có thể làm chậm đáng kể các query trao đổi nhiều dữ liệu giữa node, như distributed join, aggregation hoặc window function. Truy vấn ít truyền dữ liệu, ví dụ `SELECT count(*) FROM table`, thường chịu ảnh hưởng nhỏ hơn.
-
-Trino mặc định dùng HTTP/2 cho internal TLS. Nếu cần chẩn đoán tương thích/hiệu năng, có thể tắt trên **mọi node**:
+Khi internal TLS bật, Trino mặc định dùng HTTP/2. Nếu cần chẩn đoán tương thích/hiệu năng, tắt trên **mọi node**:
 
 ```properties
 internal-communication.http2.enabled=false
 ```
 
-Với mạng băng thông rất cao, `/dev/urandom` có thể thành nút thắt. Tài liệu Trino gợi ý thử cấu hình sau trên coordinator và tất cả workers:
+Trong môi trường băng thông rất cao, nguồn entropy có thể thành nút thắt. Trino gợi ý thử trên coordinator và mọi worker:
 
 ```properties
 http-server.https.secure-random-algorithm=SHA1PRNG
 ```
 
-Nếu máy không có đủ entropy để seed `SHA1PRNG`, thêm dòng sau vào `etc/jvm.config` của mọi node:
+Nếu host Linux thiếu entropy để seed `SHA1PRNG`, thêm vào `etc/jvm.config` của mọi node:
 
 ```text
 -Djava.security.egd=file:/dev/urandom
 ```
 
-Chỉ áp dụng phần tinh chỉnh này sau khi đo đạc; không cần cho đa số môi trường Docker local.
+Các tinh chỉnh này không cần cho hầu hết lab Docker local và chỉ nên dùng sau khi có số liệu đo.
 
-## Checklist trước khi hoàn tất
+## 7. Checklist vận hành
 
-- [ ] Coordinator có IP nội bộ cố định.
-- [ ] `discovery.uri` dùng `https://<IP-coordinator>:8443`, không dùng hostname/FQDN.
-- [ ] Shared secret mạnh, giống hệt nhau trên mọi node, không bị commit.
-- [ ] HTTPS endpoint được bật trên coordinator và mọi worker.
-- [ ] Tất cả node được khởi động lại.
-- [ ] Web UI hoặc `system.runtime.nodes` hiển thị đủ 2 workers `active`.
+- [ ] Coordinator có IP cố định trên network `trino-internal`.
+- [ ] `default` vẫn được giữ cho Nginx, Hive Metastore, MinIO và các service khác.
+- [ ] `discovery.uri` dùng `https://<IP-coordinator>:<https-port>`, không dùng hostname/FQDN.
+- [ ] Mọi node dùng cùng shared secret và secret không bị commit.
+- [ ] HTTPS endpoint/TLS internal được bật trên coordinator lẫn worker.
+- [ ] Tất cả node đã restart và hiển thị đủ worker `active`.
 
-## Nguồn tham khảo
+## Tham khảo
 
-- [Trino 482 — Secure internal communication](https://trino.io/docs/current/security/internal-communication.html)
+- [Trino — Secure internal communication](https://trino.io/docs/current/security/internal-communication.html)
 - [Trino — TLS and HTTPS](https://trino.io/docs/current/security/tls.html)

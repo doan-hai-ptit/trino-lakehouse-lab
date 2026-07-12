@@ -1,44 +1,53 @@
-# Bật xác thực bằng file mật khẩu cho Trino
+# Xác thực bằng password file cho Trino
 
-Hướng dẫn này thêm đăng nhập bằng **tên người dùng + mật khẩu** cho Trino coordinator trong Docker Compose của project này. Mật khẩu chỉ được truyền qua HTTPS tại `https://trino.localhost`, nơi Nginx đang kết thúc TLS.
+> Tóm tắt theo [Password file authentication — Trino current](https://trino.io/docs/current/security/password-file.html) (trang hiển thị Trino 482 khi đối chiếu ngày 2026-07-11).
 
-> Không dùng cơ chế này qua `http://localhost:8080`. Không mở lại cổng `8080` ra máy host, vì như vậy người dùng có thể bỏ qua lớp HTTPS/proxy.
+Password file authentication xác thực username/password của client bằng hash trong một file. Nó là **authentication**, không phải authorization: sau khi user đăng nhập, cần thêm access control (ví dụ [FILE_SYSTEM_ACCESS_CONTROL.md](FILE_SYSTEM_ACCESS_CONTROL.md)) để giới hạn catalog, schema và table.
 
-## Điều kiện trước khi thực hiện
+## 1. Điều kiện bảo mật bắt buộc
 
-- Đã hoàn tất HTTPS theo [TLS_HTTPS_LOCAL.md](TLS_HTTPS_LOCAL.md). Cấu hình hiện tại đã có `http-server.process-forwarded=true`, và Nginx gửi `X-Forwarded-Proto: https`; đây là mô hình reverse proxy được Trino hỗ trợ.
-- Shared secret phải giống nhau trên coordinator và mọi worker. Project hiện đã có `internal-communication.shared-secret` trong cả ba file cấu hình. Trino yêu cầu shared secret khi bật bất kỳ kiểu xác thực client nào.
-- Docker Desktop đang chạy. Mọi lệnh PowerShell bên dưới chạy tại thư mục gốc project.
+Theo Trino, password authentication cần:
 
-## 1. Tạo password file được bỏ qua bởi Git
+- TLS/HTTPS cho client → coordinator;
+- shared secret cấu hình đồng nhất trên mọi node.
 
-Thư mục `secrets/` đã có trong `.gitignore`, nên password hash không bị commit. Tạo thư mục và tạo user đầu tiên (`admin`):
+Lab này dùng HTTPS qua Nginx theo [TLS_HTTPS_LOCAL.md](TLS_HTTPS_LOCAL.md). Trước khi bật/đánh giá password login, bảo đảm `8080:8080` đã bị bỏ khỏi service `trino`: nếu coordinator còn public HTTP trực tiếp thì người dùng có thể bỏ qua lớp proxy/HTTPS.
+
+Shared secret đang nằm literal trong các file tracked của lab hiện tại phải được coi là đã lộ. Rotate và chuyển nó sang cơ chế secret/config ngoài Git trước khi dùng ngoài môi trường lab.
+
+> Không bật `http-server.authentication.allow-insecure-over-http=true` chỉ để giải quyết lỗi kết nối. Hãy sửa topology để client chỉ đến HTTPS proxy.
+
+## 2. Tạo password file ngoài Git
+
+Repository mount `./secrets/trino-secrets` vào `/etc/trino-secrets` của coordinator. Dùng **đúng một** thư mục này cho mọi lệnh:
 
 ```powershell
-New-Item -ItemType Directory -Force secrets\trino
+New-Item -ItemType Directory -Force secrets\trino-secrets
 docker run --rm -it -v "${PWD}\secrets\trino-secrets:/work" httpd:2.4-alpine `
   htpasswd -B -C 10 -c /work/password.db admin
 ```
 
-Lệnh sẽ hỏi mật khẩu hai lần và tạo `secrets/trino/password.db`. Tùy chọn `-B` tạo bcrypt; `-C 10` đặt cost là 10 (Trino yêu cầu bcrypt có cost tối thiểu là 8). Không ghi mật khẩu dạng rõ vào file hay commit file này.
+`-B` tạo bcrypt và `-C 10` đặt cost 10; Trino yêu cầu bcrypt có cost tối thiểu là 8. `-c` chỉ dùng khi tạo file lần đầu vì nó có thể ghi đè file hiện có.
 
-Để thêm user mới, **bỏ `-c`** (vì `-c` sẽ tạo lại và có thể ghi đè file):
+Thêm hoặc đổi password user (bỏ `-c`):
 
 ```powershell
 docker run --rm -it -v "${PWD}\secrets\trino-secrets:/work" httpd:2.4-alpine `
   htpasswd -B -C 10 /work/password.db analyst
 ```
 
-Để đổi mật khẩu của user đã có, chạy lại lệnh thêm user với cùng tên. Xóa một user bằng:
+Xóa user:
 
 ```powershell
 docker run --rm -it -v "${PWD}\secrets\trino-secrets:/work" httpd:2.4-alpine `
   htpasswd -D /work/password.db analyst
 ```
 
-## 2. Tạo cấu hình password authenticator
+Password file có một dòng `username:password-hash` cho mỗi user. Trino chỉ chấp nhận bcrypt hoặc PBKDF2; không lưu mật khẩu rõ. Giữ `secrets/` trong `.gitignore`, giới hạn quyền đọc file và không đưa password/hash vào log.
 
-Tạo file `trino/etc/password-authenticator.properties` với nội dung sau:
+## 3. Cấu hình password authenticator trên coordinator
+
+Tạo `trino/etc/password-authenticator.properties`:
 
 ```properties
 password-authenticator.name=file
@@ -47,21 +56,29 @@ file.password-file=/etc/trino-secrets/password.db
 file.refresh-period=5s
 ```
 
-`password.db` có một dòng cho mỗi user theo dạng `username:password-hash`. Trino chỉ chấp nhận hash bcrypt hoặc PBKDF2; không tự lưu hay so sánh mật khẩu rõ.
+Các property cần nhớ:
 
-## 3. Bật PASSWORD trên coordinator
+| Property | Ý nghĩa |
+| --- | --- |
+| `file.password-file` | Đường dẫn password file trong container. |
+| `file.refresh-period` | Chu kỳ nạp lại file; mặc định `5s`. |
+| `file.auth-token-cache.max-size` | Số password đã xác thực được cache; mặc định `1000`. |
 
-Mở `trino/etc/config.properties` và thêm dòng sau (giữ nguyên các dòng có sẵn):
+Chỉ cấu hình authenticator trên coordinator. Không thêm `password-authenticator.properties` vào worker.
+
+## 4. Bật kiểu xác thực PASSWORD
+
+Trong `trino/etc/config.properties` của coordinator:
 
 ```properties
 http-server.authentication.type=PASSWORD
 ```
 
-Chỉ coordinator cần `password-authenticator.properties` và `http-server.authentication.type`. Không thêm cấu hình authenticator vào các worker.
+Giữ shared secret ở tất cả node theo tài liệu internal communication; không sao chép giá trị secret vào Markdown hay Git.
 
-## 4. Mount password file vào container coordinator
+## 5. Mount password file chỉ-đọc
 
-Trong service `trino` của `docker-compose.yaml`, mount thư mục chứa password file tại một đường dẫn **ngoài** `/etc/trino`:
+Trong service `trino` của `docker-compose.yaml`:
 
 ```yaml
   trino:
@@ -71,9 +88,11 @@ Trong service `trino` của `docker-compose.yaml`, mount thư mục chứa passw
       - "./secrets/trino-secrets:/etc/trino-secrets:ro"
 ```
 
-Không mount bên dưới `/etc/trino`: thư mục này đã được mount chỉ-đọc, nên Docker không thể tạo mount point lồng nhau như `/etc/trino/password.db`. Mount thư mục ở trên chỉ-đọc, để Trino đọc hash nhưng không sửa file nguồn.
+Không mount `password.db` dưới `/etc/trino`: thư mục này đã được mount chỉ-đọc. Mount riêng ở `/etc/trino-secrets` cho phép Trino đọc hash mà không sửa file host.
 
-## 5. Kiểm tra và khởi động lại
+## 6. Khởi động và xác minh
+
+Sau khi đổi `config.properties` hoặc thêm authenticator, recreate services:
 
 ```powershell
 docker compose config --quiet
@@ -82,30 +101,28 @@ docker compose ps
 docker compose logs trino
 ```
 
-Nếu Trino không khởi động, kiểm tra trước rằng file `secrets/trino/password.db` tồn tại và `trino/etc/password-authenticator.properties` có đúng tên authenticator là `file`.
+Mở `https://trino.localhost/ui`, đăng nhập bằng `admin` và password vừa tạo, rồi thử password sai để xác nhận bị từ chối.
 
-## 6. Xác minh đăng nhập
+Kiểm tra bằng CLI qua HTTPS:
 
-1. Mở `https://trino.localhost/ui`. Nhập user `admin` và mật khẩu vừa tạo. Đăng nhập thành công sẽ hiển thị user ở góc trên phải.
-2. Thử một mật khẩu sai; đăng nhập phải bị từ chối.
-3. Dùng Trino CLI qua HTTPS:
+```powershell
+trino --server https://trino.localhost --user admin --password
+```
 
-   ```powershell
-   trino --server https://trino.localhost --user admin --password
-   ```
+```sql
+SELECT current_user;
+```
 
-   Sau khi CLI hỏi mật khẩu, chạy:
+Sau khi file authenticator đã được nạp, thêm/đổi/xóa user trong `password.db` thường không cần restart coordinator vì Trino đọc lại theo `file.refresh-period`.
 
-   ```sql
-   SELECT current_user;
-   ```
+## 7. Checklist vận hành
 
-## Vận hành và lưu ý bảo mật
-
-- Trino tự nạp lại password file theo `file.refresh-period` (mặc định `5s`), nên thường không cần restart coordinator sau khi thêm/đổi/xóa user.
-- `file.auth-token-cache.max-size` có mặc định là `1000`; chỉ cần cấu hình nếu cần giới hạn cache token đã xác thực.
-- Password file authentication chỉ xác thực danh tính; nó chưa giới hạn catalog, schema, hay bảng. Khi cần phân quyền, cấu hình thêm system access control (ví dụ file-based access control).
-- Secret hiện có trong các `config.properties` nên được thay bằng secret mới và đưa ra khỏi Git trước khi dùng ngoài môi trường lab.
+- [ ] Client chỉ truy cập HTTPS proxy; không còn host port `8080` public.
+- [ ] Shared secret giống nhau trên coordinator và worker.
+- [ ] `password.db` dùng bcrypt/PBKDF2, không chứa password rõ.
+- [ ] `password.db` nằm ở `secrets/trino-secrets`, bị Git bỏ qua và mount chỉ-đọc.
+- [ ] Password authenticator và `http-server.authentication.type=PASSWORD` chỉ có trên coordinator.
+- [ ] Đã cấu hình access control nếu user không được phép thấy toàn bộ dữ liệu.
 
 ## Tham khảo
 
