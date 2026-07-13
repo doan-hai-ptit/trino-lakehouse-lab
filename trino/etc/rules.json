@@ -15,14 +15,9 @@
       "allow": "all"
     },
     {
-      "user": "alice\\.de",
+      "group": "data_engineering",
       "catalog": "iceberg",
       "allow": "all"
-    },
-    {
-      "user": "alice",
-      "catalog": "postgresql",
-      "allow": "read-only"
     },
     {
       "catalog": "system",

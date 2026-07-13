@@ -4,15 +4,15 @@
 
 Group provider ánh xạ username vào các group để access control và resource group management có thể cấp quyền theo nhóm thay vì từng user. Nó không tạo authentication, role hay quyền; sau khi provider trả group, system access control mới quyết định user được làm gì.
 
-## 1. Trạng thái và phạm vi trong lab này
+## 1. Cấu hình và phạm vi
 
 Group provider được cấu hình bằng `etc/group-provider.properties` trên **coordinator**. Giá trị `group-provider.name` chỉ có thể là `file` hoặc `ldap`; toàn bộ config của provider đã chọn nằm trong cùng file này.
-
-> File ACL hiện có selector group như `finance|human_resources`, nhưng repository chưa có `group-provider.properties` hay group file. Vì vậy các rule dựa vào group chưa có nguồn membership để khớp như mong đợi. Tạo provider là bước cần thiết trước khi dựa vào những rule đó.
 
 User mapping và group mapping phải dùng cùng username chuẩn hóa. Nếu [USER_MAPPING.md](USER_MAPPING.md) chuyển `alice@example.com` thành `alice`, group file/LDAP phải có member `alice`, không phải email gốc.
 
 ## 2. Property chung
+
+**Tạo hoặc sửa `etc/group-provider.properties` trên coordinator**, rồi thêm property `group-provider.name` để chọn provider:
 
 ```properties
 group-provider.name=file
@@ -27,25 +27,22 @@ Chọn một quy ước case và dùng nhất quán trong group source lẫn acc
 
 ## 3. File group provider
 
-Phù hợp với lab nhỏ hoặc group membership được quản lý cùng cấu hình. Cấu hình Trino tối thiểu:
+Phù hợp với môi trường nhỏ hoặc group membership được quản lý cùng cấu hình.
 
-```properties
-group-provider.name=file
-file.group-file=/path/to/group.txt
-```
-
-`file.refresh-period` là chu kỳ đọc lại group file, mặc định `5s`.
-
-Trong Docker Compose của repository này, đặt file dưới `trino/etc` (được mount read-only vào `/etc/trino`) và dùng path tuyệt đối trong container:
+**Tạo `etc/group-provider.properties` trên coordinator và thêm block sau.** Giá trị `file.group-file` là đường dẫn tới file membership; trong ví dụ, file đó là `etc/group.txt`.
 
 ```properties
 group-provider.name=file
 group-provider.group-case=lower
-file.group-file=/etc/trino/group.txt
+file.group-file=etc/group.txt
 file.refresh-period=5s
 ```
 
+`file.refresh-period` là chu kỳ đọc lại group file, mặc định `5s`. Nếu đặt membership ở đường dẫn khác, thay `etc/group.txt` bằng đường dẫn đó.
+
 ### Định dạng group file
+
+**Tạo `etc/group.txt` (hoặc file đã khai báo trong `file.group-file`) và thêm các dòng membership dưới đây.** Chúng không phải property và không được chép vào `group-provider.properties`.
 
 Mỗi dòng là một group, dấu `:` ngăn cách group và members; members cách nhau bằng dấu phẩy:
 
@@ -60,11 +57,11 @@ finance:alice,bob
 human_resources:carol
 ```
 
-Sau khi file được nạp, cập nhật membership thường có hiệu lực trong vòng `file.refresh-period`; thay đổi `group-provider.properties` vẫn nên recreate coordinator.
+Sau khi file được nạp, cập nhật membership thường có hiệu lực trong vòng `file.refresh-period`; thay đổi `group-provider.properties` cần restart coordinator.
 
 ## 4. LDAP group provider
 
-Dùng LDAP khi group membership đã được quản lý tập trung. Bắt đầu bằng:
+Dùng LDAP khi group membership đã được quản lý tập trung. **Tạo hoặc sửa `etc/group-provider.properties` trên coordinator và thay cấu hình file provider bằng block LDAP.** Không giữ property `file.*` khi đã chọn LDAP. Bắt đầu bằng:
 
 ```properties
 group-provider.name=ldap
@@ -80,7 +77,7 @@ group-provider.name=ldap
 | Tên group | `ldap.group-name-attribute`, ví dụ `cn`. |
 | Referral | `ldap.ignore-referrals` (mặc định `false`). |
 
-Không ghi password LDAP thật trong file tracked. Nếu `group-provider.properties` cần bind credential, mount một file config/secret ngoài Git hoặc dùng cơ chế secrets phù hợp. Ưu tiên `ldaps://` hoặc truststore phù hợp; không bật `ldap.allow-insecure=true` để “sửa” lỗi certificate.
+Không ghi password LDAP thật trong file tracked. Giá trị `ldap.admin-password=your_password` trong các mẫu chỉ là placeholder. Nếu `group-provider.properties` cần bind credential, dùng cơ chế quản lý secret phù hợp với cách triển khai của bạn; không commit secret vào repository. Ưu tiên `ldaps://` hoặc truststore phù hợp; không bật `ldap.allow-insecure=true` để “sửa” lỗi certificate.
 
 ### Chọn cách resolve group
 
@@ -92,6 +89,8 @@ Không ghi password LDAP thật trong file tracked. Nếu `group-provider.proper
 | Attribute-based | Đặt `ldap.use-group-filter=false` và cấu hình `ldap.user-member-of-attribute`, thường là `memberOf`. Trino đọc danh sách group từ user attribute. |
 
 ### Mẫu OpenLDAP: search-based
+
+**Thay nội dung `etc/group-provider.properties` bằng toàn bộ block này**; đây là phương án thay thế cho file provider, không phải một file bổ sung:
 
 ```properties
 group-provider.name=ldap
@@ -110,6 +109,8 @@ ldap.group-search-member-attribute=member
 ```
 
 ### Mẫu Active Directory: attribute-based, single query
+
+**Thay nội dung `etc/group-provider.properties` bằng toàn bộ block này**; thay các DN/filter/credential bằng giá trị môi trường thực tế:
 
 ```properties
 group-provider.name=ldap
@@ -130,7 +131,7 @@ Các giá trị DN, attribute và filter phụ thuộc LDAP schema thực tế; 
 
 ## 5. Dùng group trong access control
 
-Trino chuyển group đã resolve đến system access control. File ACL có thể dùng `group` regex, ví dụ:
+Trino chuyển group đã resolve đến system access control. **Thêm section `catalogs` dưới đây vào JSON rule file ACL đã cấu hình** (ví dụ `etc/rules.json`), không đặt JSON này trong `group-provider.properties`. File ACL có thể dùng `group` regex, ví dụ:
 
 ```json
 {
@@ -144,20 +145,13 @@ Trino chuyển group đã resolve đến system access control. File ACL có th�
 }
 ```
 
-Đây chỉ là ví dụ. Quy tắc hiện tại trong repository có catalog mẫu không hoàn toàn trùng catalog thực tế; hãy điều chỉnh catalog, schema/table và group theo environment trước khi kiểm thử. Xem [FILE_SYSTEM_ACCESS_CONTROL.md](FILE_SYSTEM_ACCESS_CONTROL.md) để biết thứ tự rule “first match wins”.
+Đây chỉ là ví dụ. Hãy điều chỉnh catalog, schema/table và group theo environment trước khi kiểm thử. Xem [FILE_SYSTEM_ACCESS_CONTROL.md](FILE_SYSTEM_ACCESS_CONTROL.md) để biết thứ tự rule “first match wins”.
 
 ## 6. Kiểm thử
 
-1. Tạo `group-provider.properties` và, nếu dùng file provider, `group.txt` dưới `trino/etc`.
-2. Recreate coordinator sau khi đổi provider config:
-
-   ```powershell
-   docker compose config --quiet
-   docker compose up -d --force-recreate trino nginx
-   docker compose logs trino
-   ```
-
-3. Đăng nhập bằng user thuộc một group đã biết qua HTTPS, rồi chạy:
+1. Tạo `etc/group-provider.properties`. Nếu dùng file provider, tạo thêm `etc/group.txt` (hoặc file đã khai báo); nếu dùng LDAP, chỉ dùng `group-provider.properties`.
+2. Restart coordinator sau khi đổi provider config. Với file provider, thay đổi membership thường có hiệu lực sau `file.refresh-period`.
+3. Đăng nhập bằng user thuộc một group đã biết, rồi chạy:
 
    ```sql
    SELECT current_user;
@@ -172,7 +166,7 @@ Trino chuyển group đã resolve đến system access control. File ACL có th�
 - [ ] Username trong group source khớp username sau authentication/user mapping.
 - [ ] Case của group nhất quán với ACL regex.
 - [ ] LDAP URL/TLS/truststore và bind credential được bảo vệ; không commit secret.
-- [ ] ACL rule dùng đúng catalog/schema/table trong lab, không chỉ mẫu từ tài liệu.
+- [ ] ACL rule dùng đúng catalog/schema/table trong môi trường triển khai, không chỉ mẫu từ tài liệu.
 - [ ] Đã test allow và deny bằng user thật qua HTTPS.
 
 ## Tham khảo
