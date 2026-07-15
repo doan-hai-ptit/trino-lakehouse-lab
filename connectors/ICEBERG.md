@@ -242,6 +242,403 @@ ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_thres
 
 `table_changes` trả về thay đổi cấp dòng giữa hai snapshot, nhưng không hỗ trợ snapshot có delete files và không tính “net effect” của nhiều snapshot. Nếu một hàng bị xóa rồi thêm lại trong phạm vi, kết quả vẫn có cả delete và insert.
 
+### 6.4 Tham chiếu SQL đầy đủ
+
+Phần này bổ sung đầy đủ các nhóm câu lệnh Iceberg cần dùng trong vận hành. Các câu lệnh thay đổi metadata hoặc xóa dữ liệu (`register_table`, `add_files`, `expire_snapshots`, `remove_orphan_files`, `rollback_to_snapshot`) chỉ chạy sau khi đã kiểm tra quyền, retention và ảnh hưởng với engine khác.
+
+#### Tạo schema và bảng
+
+```sql
+CREATE SCHEMA example.example_s3_schema
+WITH (location = 's3://my-bucket/a/path/');
+
+CREATE SCHEMA example.example_s3a_schema
+WITH (location = 's3a://my-bucket/a/path/');
+
+CREATE SCHEMA example.example_hdfs_schema
+WITH (location='hdfs://hadoop-master:9000/user/hive/warehouse/a/path/');
+
+CREATE SCHEMA example.example_hdfs_schema;
+
+CREATE TABLE example_table (
+    c1 INTEGER,
+    c2 DATE,
+    c3 DOUBLE
+)
+WITH (
+    format = 'PARQUET',
+    partitioning = ARRAY['c1', 'c2'],
+    sorted_by = ARRAY['c3'],
+    location = 's3://my-bucket/a/path/'
+);
+
+CREATE TABLE tiny_nation
+WITH (
+    format = 'PARQUET'
+)
+AS
+    SELECT *
+    FROM nation
+    WHERE nationkey < 10;
+
+CREATE TABLE yearly_clicks (
+    year,
+    clicks
+)
+WITH (
+    partitioning = ARRAY['year']
+)
+AS VALUES
+    (2021, 10000),
+    (2022, 20000);
+```
+
+Nếu không đặt `location` cho table, nội dung bảng được tạo dưới location của schema. Các table property `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location` và `extra_properties` cần được chọn theo file format và workload.
+
+```sql
+CREATE TABLE test_table (
+    c1 INTEGER,
+    c2 DATE,
+    c3 DOUBLE)
+WITH (
+    format = 'PARQUET',
+    partitioning = ARRAY['c1', 'c2'],
+    location = '/var/example_tables/test_table');
+
+CREATE TABLE test_table (
+    c1 INTEGER,
+    c2 DATE,
+    c3 DOUBLE)
+WITH (
+    format = 'ORC',
+    compression_codec = 'SNAPPY',
+    location = '/var/example_tables/test_table',
+    orc_bloom_filter_columns = ARRAY['c1', 'c2'],
+    orc_bloom_filter_fpp = 0.05);
+
+CREATE TABLE test_table (
+    data INTEGER,
+    parent ROW(child1 DOUBLE, child2 INTEGER))
+WITH (
+    format = 'AVRO',
+    partitioning = ARRAY['"parent.child1"']);
+```
+
+#### Procedure: đăng ký, bỏ đăng ký và di trú bảng
+
+`register_table` bị tắt mặc định và chỉ hoạt động khi `iceberg.register-table-procedure.enabled=true`. `unregister_table` chỉ bỏ metadata registration, không xóa data files. `migrate` sao chép schema, partitioning, properties, location và tham chiếu đến Parquet/ORC/Avro files của Hive table; Hive bucketed table trở thành Iceberg không bucketed.
+
+```sql
+CALL examplecatalog.system.example_procedure();
+
+CALL example.system.register_table(
+  schema_name => 'testdb',
+  table_name => 'customer_orders',
+  table_location => 'hdfs://hadoop-master:9000/user/hive/warehouse/customer_orders-581fad8517934af6be1857a903559d44');
+
+CALL example.system.register_table(
+  schema_name => 'testdb',
+  table_name => 'customer_orders',
+  table_location => 'hdfs://hadoop-master:9000/user/hive/warehouse/customer_orders-581fad8517934af6be1857a903559d44',
+  metadata_file_name => '00003-409702ba-4735-4645-8f14-09537cc0b2c8.metadata.json');
+
+CALL example.system.unregister_table(
+  schema_name => 'testdb',
+  table_name => 'customer_orders');
+
+CALL example.system.migrate(
+    schema_name => 'testdb',
+    table_name => 'customer_orders');
+
+CALL example.system.migrate(
+    schema_name => 'testdb',
+    table_name => 'customer_orders',
+    recursive_directory => 'true');
+```
+
+`recursive_directory` mặc định `fail`; dùng `true` để gồm nested directory hoặc `false` để bỏ qua chúng. Migration fail nếu một partition chứa format không hỗ trợ.
+
+#### Procedure: Add files
+
+Trước khi dùng `add_files_from_table` hoặc `add_files`, thêm property sau vào `etc/catalog/iceberg.properties`.
+
+```properties
+iceberg.add-files-procedure.enabled=true
+```
+
+`add_files_from_table` thêm Parquet, ORC hoặc Avro files từ một Hive table trong **cùng catalog** vào Iceberg target table. `add_files` thêm files tại location; chỉ nhận `ORC` hoặc `PARQUET`, format target phải trùng format file và procedure **không tự kiểm tra schema compatibility**.
+
+```sql
+ALTER TABLE example.lakehouse.iceberg_customer_orders
+EXECUTE add_files_from_table(
+    schema_name => 'legacy',
+    table_name => 'customer_orders');
+
+USE example.lakehouse;
+ALTER TABLE iceberg_customer_orders
+EXECUTE add_files_from_table(
+    schema_name => 'legacy',
+    table_name => 'customer_orders');
+
+ALTER TABLE example.lakehouse.iceberg_customer_orders
+EXECUTE add_files_from_table(
+    schema_name => 'legacy',
+    table_name => 'customer_orders',
+    partition_filter => map(ARRAY['region', 'country'], ARRAY['ASIA', 'JAPAN']));
+
+ALTER TABLE example.lakehouse.iceberg_customer_orders
+EXECUTE add_files_from_table(
+    schema_name => 'legacy',
+    table_name => 'customer_orders',
+    recursive_directory => 'true');
+
+ALTER TABLE example.lakehouse.iceberg_customer_orders
+EXECUTE add_files(
+    location => 's3://my-bucket/a/path',
+    format => 'ORC');
+```
+
+`partition_filter` chỉ nạp các partition chỉ định. `recursive_directory` của `add_files_from_table` cũng mặc định `fail`, nhận `true` hoặc `false` như `migrate`. Chỉ chạy add-files sau khi tự xác minh schema, partitioning, record semantics và chắc chắn source files sẽ không bị engine khác sửa/xóa ngoài Iceberg metadata.
+
+#### Function, DML và partition delete
+
+`system.bucket` nhận partition value và số bucket; giá trị đầu tiên có thể là `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `VARCHAR`, `VARBINARY`, `DATE`, `TIMESTAMP` hoặc `TIMESTAMP WITH TIME ZONE`. Connector hỗ trợ `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` và `MERGE`. Với partition identity transform, filter chỉ trên partition columns có thể xóa toàn bộ partition; row-level delete cần format v2 và position delete files.
+
+```sql
+SELECT system.bucket('trino', 16);
+
+SELECT count(*)
+FROM customer
+WHERE system.bucket(custkey, 16) = 2;
+
+DELETE FROM example.testdb.customer_orders
+WHERE country = 'US';
+```
+
+#### Optimize, manifest và dọn dữ liệu
+
+`optimize` gộp data files nhỏ (default threshold `100MB`) và delete files theo partition. `optimize_manifests` viết lại manifest để gom theo partition. `expire_snapshots` và `remove_orphan_files` là thao tác xóa: `retention_threshold` không được thấp hơn `iceberg.expire-snapshots.min-retention` hoặc `iceberg.remove-orphan-files.min-retention`.
+
+```sql
+ALTER TABLE test_table EXECUTE optimize;
+
+ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB');
+
+ALTER TABLE test_partitioned_table EXECUTE optimize
+WHERE partition_key = 1;
+
+ALTER TABLE test_table EXECUTE optimize
+WHERE CAST(timestamp_tz AS DATE) > DATE '2021-12-31';
+
+ALTER TABLE test_table EXECUTE optimize
+WHERE "$file_modified_time" > date_trunc('day', CURRENT_TIMESTAMP);
+
+ALTER TABLE test_table EXECUTE optimize_manifests;
+
+ALTER TABLE test_table EXECUTE expire_snapshots(retention_threshold => '7d');
+
+ALTER TABLE test_table EXECUTE remove_orphan_files(retention_threshold => '7d');
+
+ALTER TABLE test_table EXECUTE drop_extended_stats;
+```
+
+`expire_snapshots` còn nhận `retain_last` (mặc định `1`) và `clean_expired_metadata` (mặc định `false`). `remove_orphan_files` chỉ xóa file cũ hơn retention không còn được metadata liên kết.
+
+#### Thay đổi table properties, partitioning và sorted writing
+
+Các property được phép đổi bằng `ALTER TABLE SET PROPERTIES` là `format`, `format_version`, `partitioning`, `sorted_by`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `object_store_layout_enabled` và `data_location`.
+
+```sql
+ALTER TABLE table_name SET PROPERTIES format_version = 2;
+
+ALTER TABLE table_name SET PROPERTIES partitioning = ARRAY[<existing partition columns>, 'my_new_partition_column'];
+
+SHOW CREATE TABLE table_name;
+
+CREATE TABLE example.testdb.customer_orders (
+    order_id BIGINT,
+    order_date DATE,
+    account_number BIGINT,
+    customer VARCHAR,
+    country VARCHAR)
+WITH (partitioning = ARRAY['month(order_date)', 'bucket(account_number, 10)', 'country']);
+
+CREATE TABLE example.customers.orders (
+    order_id BIGINT,
+    order_date DATE,
+    account_number BIGINT,
+    customer VARCHAR,
+    country VARCHAR)
+WITH (sorted_by = ARRAY['order_date']);
+
+CREATE TABLE example.customers.orders (
+    order_id BIGINT,
+    order_date DATE,
+    account_number BIGINT,
+    customer VARCHAR,
+    country VARCHAR)
+WITH (sorted_by = ARRAY['order_date DESC NULLS FIRST', 'order_id ASC NULLS LAST']);
+
+CREATE TABLE example.customers.orders (
+    order_id BIGINT,
+    order_date DATE,
+    account_number BIGINT,
+    customer VARCHAR,
+    country VARCHAR)
+WITH (
+    partitioning = ARRAY['month(order_date)'],
+    sorted_by = ARRAY['order_date']
+);
+```
+
+Schema evolution hỗ trợ add/drop/rename cột, kể cả nested structure; type chỉ widening `INTEGER` → `BIGINT`, `REAL` → `DOUBLE`, hoặc tăng precision `DECIMAL` mà không đổi scale. `sorted_writing_enabled=false` tắt sorted write cho session.
+
+#### Metadata tables, metadata columns và system table
+
+Các metadata table được gọi bằng hậu tố sau tên bảng: `$properties`, `$history`, `$metadata_log_entries`, `$snapshots`, `$manifests`, `$all_manifests`, `$partitions`, `$files`, `$entries`, `$all_entries`, `$refs`. `$manifests`, `$files`, `$entries` là current snapshot; biến thể `all` chứa mọi snapshot.
+
+```sql
+SELECT * FROM "test_table$properties";
+
+SELECT * FROM "test_table$history";
+
+SELECT * FROM "test_table$metadata_log_entries";
+
+SELECT * FROM "test_table$snapshots";
+
+SELECT * FROM "test_table$manifests";
+
+SELECT * FROM "test_table$partitions";
+
+SELECT * FROM "test_table$files";
+
+SELECT * FROM "test_table$entries";
+
+SELECT * FROM "test_table$refs";
+
+SELECT *, "$partition", "$path", "$file_modified_time"
+FROM example.web.page_views;
+
+SELECT *
+FROM example.web.page_views
+WHERE "$path" = '/usr/iceberg/table/web.page_views/data/file_01.parquet';
+
+SELECT *
+FROM example.web.page_views
+WHERE "$file_modified_time" = CAST('2022-07-01 01:02:03.456 UTC' AS TIMESTAMP WITH TIME ZONE);
+
+SELECT * FROM example.system.iceberg_tables;
+```
+
+`example.system.iceberg_tables` liệt kê chỉ các table Iceberg mà catalog xử lý được; `SHOW TABLES`/`information_schema.tables` có thể còn trả table format khác khi cùng metastore.
+
+#### Snapshot, replace, time travel và rollback
+
+```sql
+SELECT snapshot_id
+FROM example.testdb."customer_orders$snapshots"
+ORDER BY committed_at DESC;
+
+CREATE OR REPLACE TABLE example_table
+WITH (sorted_by = ARRAY['a'])
+AS SELECT * FROM another_table;
+
+SELECT *
+FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955;
+
+SELECT *
+FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna';
+
+CREATE OR REPLACE TABLE example.testdb.customer_orders AS
+SELECT *
+FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna';
+
+SELECT *
+FROM example.testdb.customer_orders FOR TIMESTAMP AS OF DATE '2022-03-23';
+
+SELECT *
+FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 00:00:00';
+
+SELECT *
+FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 00:00:00.000 Europe/Vienna';
+
+SELECT *
+FROM example.testdb.customer_orders FOR VERSION AS OF 'historical-tag';
+
+SELECT *
+FROM example.testdb.customer_orders FOR VERSION AS OF 'test-branch';
+
+SELECT snapshot_id
+FROM example.testdb."customer_orders$snapshots"
+ORDER BY committed_at DESC LIMIT 1;
+
+ALTER TABLE testdb.customer_orders EXECUTE rollback_to_snapshot(8954597067493422955);
+
+CREATE TABLE example_table (
+    year INTEGER NOT NULL,
+    name VARCHAR NOT NULL,
+    age INTEGER,
+    address VARCHAR
+);
+```
+
+`CREATE OR REPLACE TABLE` là atomic và tạo snapshot mới. `NOT NULL` làm `INSERT`/`UPDATE` fail nếu cố ghi `NULL` vào cột đó.
+
+#### Materialized view và table_changes
+
+Materialized view dùng Iceberg storage table. Khi tạo materialized view, có thể dùng table properties sau cho storage table; `REFRESH MATERIALIZED VIEW` mới nạp dữ liệu. Refresh có thể incremental hoặc full và vẫn atomic với reader.
+
+```sql
+WITH ( format = 'ORC', partitioning = ARRAY['event_date'] )
+
+SELECT
+  *
+FROM
+  TABLE(
+    system.table_changes(
+      schema_name => 'default',
+      table_name => 't1',
+      start_snapshot_id => 6541165659943306573,
+      end_snapshot_id => 6745790645714043599
+    )
+  );
+
+CREATE TABLE test_schema.pages (page_url VARCHAR, domain VARCHAR, views INTEGER);
+
+INSERT INTO test_schema.pages
+    VALUES
+        ('url1', 'domain1', 1),
+        ('url2', 'domain2', 2),
+        ('url3', 'domain1', 3);
+
+INSERT INTO test_schema.pages
+    VALUES
+        ('url4', 'domain1', 400),
+        ('url5', 'domain2', 500),
+        ('url6', 'domain3', 2);
+
+SELECT
+    snapshot_id,
+    parent_id,
+    operation
+FROM test_schema."pages$snapshots";
+
+SELECT
+    *
+FROM
+    TABLE(
+        system.table_changes(
+                schema_name => 'test_schema',
+                table_name => 'pages',
+                start_snapshot_id => 2009020668682716382,
+                end_snapshot_id => 3108755571950643966
+        )
+    )
+ORDER BY _change_ordinal ASC;
+```
+
+`table_changes` dùng start snapshot **exclusive** và end snapshot **inclusive**, trả `_change_type`, `_change_version_id`, `_change_timestamp`, `_change_ordinal`. Nó không hỗ trợ snapshot chứa delete files và không tính net effect giữa nhiều snapshot: một row bị xóa rồi thêm lại vẫn trả cả delete lẫn insert.
+
 ## 7. Hiệu năng và các điểm cần theo dõi
 
 - Partition theo filter phổ biến, nhưng tránh partition quá mịn gây nhiều file nhỏ. Dùng transform như `month(event_date)` khi phù hợp.
