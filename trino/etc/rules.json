@@ -6,11 +6,6 @@
       "allow": "all"
     },
     {
-      "group": "finance|human_resources",
-      "catalog": "postgres",
-      "allow": true
-    },
-    {
       "catalog": "hive",
       "allow": "all"
     },
@@ -20,8 +15,51 @@
       "allow": "all"
     },
     {
+      "group": "data_science",
+      "catalog": "iceberg",
+      "allow": "all"
+    },
+    {
+      "group": "data_analytics",
+      "catalog": "iceberg",
+      "allow": "all"
+    },
+    {
       "catalog": "system",
       "allow": "none"
+    }
+  ],
+  "schemas": [
+    {
+      "role": "admin",
+      "schema": ".*",
+      "owner": true
+    },
+    {
+      "group": "data_engineering",
+      "schema": "bronze|silver",
+      "owner": true
+    },
+    {
+      "catalog": "default",
+      "schema": "default",
+      "owner": true
+    }
+  ],
+  "tables": [
+    {
+      "group": "data_engineering",
+      "catalog": "iceberg",
+      "schema": "bronze|silver",
+      "table": ".*",
+      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE"]
+    },
+    {
+      "group": "data_analytics",
+      "catalog": "iceberg",
+      "schema": "mart|quality",
+      "table": ".*",
+      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE"]
     }
   ]
 }
