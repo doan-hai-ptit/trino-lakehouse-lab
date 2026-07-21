@@ -1,8 +1,8 @@
 {
   "catalogs": [
     {
-      "role": "admin",
-      "catalog": "(mysql|system|iceberg)",
+      "user": "admin",
+      "catalog": ".*",
       "allow": "all"
     },
     {
@@ -21,7 +21,7 @@
     },
     {
       "group": "data_analytics",
-      "catalog": "iceberg",
+      "catalog": "iceberg|postgres_ops",
       "allow": "all"
     },
     {
@@ -31,7 +31,8 @@
   ],
   "schemas": [
     {
-      "role": "admin",
+      "user": "admin",
+      "catalog": ".*",
       "schema": ".*",
       "owner": true
     },
@@ -39,14 +40,16 @@
       "group": "data_engineering",
       "schema": "bronze|silver",
       "owner": true
-    },
-    {
-      "catalog": "default",
-      "schema": "default",
-      "owner": true
     }
   ],
   "tables": [
+    {
+      "user": "admin",
+      "catalog": ".*",
+      "schema": ".*",
+      "table": ".*",
+      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]
+    },
     {
       "group": "data_engineering",
       "catalog": "iceberg",
@@ -56,8 +59,8 @@
     },
     {
       "group": "data_analytics",
-      "catalog": "iceberg",
-      "schema": "mart|quality",
+      "catalog": "iceberg|postgres_ops",
+      "schema": "mart|quality|ops",
       "table": ".*",
       "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE"]
     }

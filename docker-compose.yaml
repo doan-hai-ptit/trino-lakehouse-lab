@@ -16,6 +16,23 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres-ops:
+    image: postgres:16-alpine
+    container_name: lakehouse-postgres-ops
+    environment:
+      POSTGRES_DB: nyc_ops
+      POSTGRES_USER: nyc_ops_user
+      POSTGRES_PASSWORD: nyc_ops_local
+    ports:
+      - "5434:5432"
+    volumes:
+      - 'D:\Volumes\trino-lakehouse\postgres-ops:/var/lib/postgresql/data'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nyc_ops_user -d nyc_ops"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: lakehouse-minio
@@ -79,6 +96,8 @@ services:
         condition: service_started
       minio:
         condition: service_healthy
+      postgres-ops:
+        condition: service_healthy
     ports:
       - "8080:8080"
     volumes:
@@ -95,6 +114,8 @@ services:
         condition: service_started
       minio:
         condition: service_healthy
+      postgres-ops:
+        condition: service_healthy
     volumes:
       - "./trino-worker-1/etc:/etc/trino:ro"
 
@@ -107,6 +128,8 @@ services:
       hive-metastore:
         condition: service_started
       minio:
+        condition: service_healthy
+      postgres-ops:
         condition: service_healthy
     volumes:
       - "./trino-worker-2/etc:/etc/trino:ro"
