@@ -9,7 +9,7 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - 'D:\Volumes\trino-lakehouse\postgres:/var/lib/postgresql/data'
+      - postgres_metastore_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
       interval: 10s
@@ -26,7 +26,7 @@ services:
     ports:
       - "5434:5432"
     volumes:
-      - 'D:\Volumes\trino-lakehouse\postgres-ops:/var/lib/postgresql/data'
+      - postgres_ops_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nyc_ops_user -d nyc_ops"]
       interval: 10s
@@ -44,7 +44,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - 'D:\Volumes\trino-lakehouse\minio:/data'
+      - minio_data:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 10s
@@ -150,3 +150,8 @@ services:
     volumes:
       - "./nginx/conf.d:/etc/nginx/conf.d:ro"
       - "./secrets/certs:/etc/nginx/certs:ro"
+
+volumes:
+  postgres_metastore_data:
+  postgres_ops_data:
+  minio_data:

@@ -51,4 +51,14 @@ jars/
 .DS_Store
 Thumbs.db
 desktop.ini
-secrets/
+# Local secrets are ignored; only documentation and inert templates are tracked.
+secrets/*
+!secrets/README.md
+!secrets/trino-secrets/
+secrets/trino-secrets/*
+!secrets/trino-secrets/password.db.example
+
+# Downloaded runtime dependencies remain local; keep their instructions tracked.
+!jars/
+jars/*
+!jars/README.md
