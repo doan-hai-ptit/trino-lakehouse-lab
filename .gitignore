@@ -26,6 +26,10 @@ build/
 
 # Docker and local runtime data
 data/
+# Keep the SQL study guide in the data area while continuing to ignore downloaded data.
+!data/
+data/*
+!data/NYC_FHVHV_LAKEHOUSE_SQL.md
 logs/
 *.log
 *.pid

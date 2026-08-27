@@ -6,23 +6,19 @@
       "allow": "all"
     },
     {
-      "catalog": "hive",
-      "allow": "all"
-    },
-    {
       "group": "data_engineering",
-      "catalog": "iceberg",
+      "catalog": "iceberg|postgres_ops",
       "allow": "all"
     },
     {
       "group": "data_science",
-      "catalog": "iceberg",
-      "allow": "all"
+      "catalog": "iceberg|postgres_ops",
+      "allow": "read-only"
     },
     {
       "group": "data_analytics",
       "catalog": "iceberg|postgres_ops",
-      "allow": "all"
+      "allow": "read-only"
     },
     {
       "catalog": "system",
@@ -38,7 +34,14 @@
     },
     {
       "group": "data_engineering",
-      "schema": "bronze|silver",
+      "catalog": "iceberg",
+      "schema": "bronze|silver|quality|semantic",
+      "owner": true
+    },
+    {
+      "group": "data_engineering",
+      "catalog": "postgres_ops",
+      "schema": "mart",
       "owner": true
     }
   ],
@@ -48,21 +51,173 @@
       "catalog": ".*",
       "schema": ".*",
       "table": ".*",
-      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP", "GRANT_SELECT"]
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "DELETE",
+        "UPDATE",
+        "OWNERSHIP",
+        "GRANT_SELECT"
+      ]
     },
     {
       "group": "data_engineering",
       "catalog": "iceberg",
-      "schema": "bronze|silver",
+      "schema": "nyc_taxi",
+      "table": "fhvhv_trips",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_engineering",
+      "catalog": "iceberg",
+      "schema": "bronze|silver|quality|semantic",
       "table": ".*",
-      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE"]
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "DELETE",
+        "UPDATE",
+        "OWNERSHIP",
+        "GRANT_SELECT"
+      ]
+    },
+    {
+      "group": "data_engineering",
+      "catalog": "postgres_ops",
+      "schema": "mart",
+      "table": ".*",
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "DELETE",
+        "UPDATE",
+        "OWNERSHIP",
+        "GRANT_SELECT"
+      ]
+    },
+    {
+      "group": "data_engineering",
+      "catalog": "postgres_ops",
+      "schema": "ops",
+      "table": "pipeline_run|dashboard_refresh_run",
+      "privileges": [
+        "SELECT",
+        "INSERT",
+        "UPDATE"
+      ]
+    },
+    {
+      "group": "data_engineering",
+      "catalog": "postgres_ops",
+      "schema": "ops",
+      "table": "data_quality_rule",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_science",
+      "catalog": "iceberg",
+      "schema": "silver",
+      "table": "fact_trip",
+      "privileges": [
+        "SELECT"
+      ],
+      "columns": [
+        {
+          "name": "driver_pay",
+          "mask": "CAST(NULL AS DECIMAL(12, 2))"
+        }
+      ],
+      "filter": "source_year = 2025"
+    },
+    {
+      "group": "data_science",
+      "catalog": "iceberg",
+      "schema": "silver",
+      "table": "dim_date|dim_location|dim_base",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_science",
+      "catalog": "iceberg",
+      "schema": "quality|semantic",
+      "table": ".*",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_science",
+      "catalog": "postgres_ops",
+      "schema": "mart",
+      "table": ".*",
+      "privileges": [
+        "SELECT"
+      ]
     },
     {
       "group": "data_analytics",
-      "catalog": "iceberg|postgres_ops",
-      "schema": "mart|quality|ops",
+      "catalog": "iceberg",
+      "schema": "quality|semantic",
       "table": ".*",
-      "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE"]
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_analytics",
+      "catalog": "postgres_ops",
+      "schema": "mart",
+      "table": ".*",
+      "privileges": [
+        "SELECT"
+      ]
+    },
+    {
+      "group": "data_analytics",
+      "catalog": "postgres_ops",
+      "schema": "ops",
+      "table": "monthly_kpi_target|zone_demand_target|data_quality_rule",
+      "privileges": [
+        "SELECT"
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "user": "admin",
+      "allow": [
+        "execute",
+        "view",
+        "kill"
+      ]
+    },
+    {
+      "allow": [
+        "execute"
+      ]
+    }
+  ],
+  "system_information": [
+    {
+      "user": "admin",
+      "allow": [
+        "read",
+        "write"
+      ]
+    }
+  ],
+  "authorization": [
+    {
+      "original_user": "admin",
+      "new_user": ".*",
+      "new_role": ".*",
+      "allow": true
     }
   ]
 }
